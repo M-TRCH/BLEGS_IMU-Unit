@@ -19,6 +19,7 @@ PROTOCOL_HEADER2 = 0xEE
 FB_IMU_DATA = 0x85
 FB_IMU_RAW = 0x86
 FB_IMU_CALIBRATION = 0x87
+CMD_SET_ZERO = 0x06
 
 # IMU Unit ID
 IMU_UNIT_ID = 0xFF
@@ -43,6 +44,25 @@ def calculate_crc16(data):
                 crc = (crc << 1) & 0xFFFF
     
     return crc
+
+def send_set_zero(port):
+    """Send SET_ZERO command to IMU unit"""
+    buffer = bytearray()
+    
+    # Headers
+    buffer.append(PROTOCOL_HEADER1)
+    buffer.append(PROTOCOL_HEADER2)
+    buffer.append(CMD_SET_ZERO)
+    buffer.append(0)  # No payload
+    
+    # Calculate CRC
+    crc = calculate_crc16(buffer[2:4])  # CRC over type and length
+    buffer.append((crc >> 8) & 0xFF)
+    buffer.append(crc & 0xFF)
+    
+    # Send command
+    port.write(buffer)
+    port.flush()
 
 def receive_packet(port, timeout=0.02):
     """Receive and validate a binary packet"""
@@ -96,23 +116,20 @@ def receive_packet(port, timeout=0.02):
 
 def parse_imu_data(payload):
     """Parse IMU Data packet (0x85)"""
-    if len(payload) != 16:
+    if len(payload) != 10:
         print(f"[ERROR] Invalid IMU data payload length: {len(payload)}")
         return None
     
-    # Unpack: unit_id, roll, pitch, yaw, gyro_x, gyro_y, gyro_z, sequence, status
-    # Format: >BhhhhhhHB (big-endian, uint8, 6x int16, uint16, uint8)
-    # Total: 1 + 2*6 + 2 + 1 = 16 bytes
-    unit_id, roll, pitch, yaw, gyro_x, gyro_y, gyro_z, sequence, status = struct.unpack('>BhhhhhhHB', payload)
+    # Unpack: unit_id, roll, pitch, yaw, sequence, status
+    # Format: >BhhhHB (big-endian, uint8, 3x int16, uint16, uint8)
+    # Total: 1 + 2*3 + 2 + 1 = 10 bytes
+    unit_id, roll, pitch, yaw, sequence, status = struct.unpack('>BhhhHB', payload)
     
     return {
         'unit_id': unit_id,
         'roll': roll / 100.0,
         'pitch': pitch / 100.0,
         'yaw': yaw / 100.0,
-        'gyro_x': gyro_x / 100.0,
-        'gyro_y': gyro_y / 100.0,
-        'gyro_z': gyro_z / 100.0,
         'sequence': sequence,
         'status': status,
         'calibrated': bool(status & IMU_STATUS_CALIBRATED),
@@ -146,9 +163,13 @@ def main():
     PORT = 'COM44'  # Change to your port
     BAUD_RATE = 921600
     
-    print("=" * 60)
+    print("="  * 60)
     print("IMU Unit - Binary Protocol Test Client")
-    print("=" * 60)
+    print("="  * 60)
+    print("Commands:")
+    print("  Press 'z' + Enter: Set current orientation as zero")
+    print("  Press Ctrl+C: Exit")
+    print("="  * 60)
     
     try:
         port = serial.Serial(PORT, BAUD_RATE, timeout=0.1)
@@ -167,8 +188,20 @@ def main():
     total_packets = 0
     error_count = 0
     
+    # Non-blocking input handling (Windows compatible)
+    import msvcrt
+    
     try:
         while True:
+            # Check for keyboard input (non-blocking)
+            if msvcrt.kbhit():
+                key = msvcrt.getch().decode('utf-8').lower()
+                if key == 'z':
+                    print("\n[CMD] Sending SET_ZERO command...")
+                    send_set_zero(port)
+                    print("[CMD] Waiting for acknowledgment...")
+                    time.sleep(0.1)
+            
             result = receive_packet(port, timeout=0.015)  # 15ms timeout for 100 Hz (10ms + margin)
             
             if result:
@@ -188,7 +221,6 @@ def main():
                         
                         # Clear line and print data (optimized formatting)
                         print(f"\r[{data['sequence']:5d}] R:{data['roll']:6.2f}° P:{data['pitch']:6.2f}° Y:{data['yaw']:6.2f}° | "
-                              f"G:({data['gyro_x']:5.1f},{data['gyro_y']:5.1f},{data['gyro_z']:5.1f})°/s | "
                               f"{packets_per_second:3d}Hz | "
                               f"Cal:{'✓' if data['calibrated'] else '✗'}", end='', flush=True)
                 

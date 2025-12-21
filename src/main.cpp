@@ -19,6 +19,12 @@ uint32_t last_sample_time_us = 0;
 uint32_t last_calibration_send = 0;
 const uint32_t CALIBRATION_SEND_INTERVAL = 5000;  // Send calibration status every 5 seconds
 
+// Zero calibration offsets (for Set Zero command)
+float roll_offset = 0.0f;
+float pitch_offset = 0.0f;
+float yaw_offset = 0.0f;
+bool zero_calibrated = false;
+
 // Cache calibration status (update every 100 samples to reduce I2C overhead)
 uint8_t cached_system_cal = 0, cached_gyro_cal = 0, cached_accel_cal = 0, cached_mag_cal = 0;
 uint16_t calibration_read_counter = 0;
@@ -132,6 +138,38 @@ void setup()
 
 void loop()
 {
+    // Check for incoming commands from computer
+    if (isBinaryPacketAvailable(Serial))
+    {
+        uint8_t packet_type;
+        uint8_t payload[PROTOCOL_MAX_PAYLOAD];
+        uint8_t payload_length;
+        
+        if (receivePacket(Serial, &packet_type, payload, &payload_length))
+        {
+            if (packet_type == CMD_SET_ZERO)
+            {
+                // Set current orientation as zero point
+                sensors_event_t current_orientation;
+                bno.getEvent(&current_orientation, Adafruit_BNO055::VECTOR_EULER);
+                
+                roll_offset = current_orientation.orientation.y;
+                pitch_offset = current_orientation.orientation.z;
+                yaw_offset = current_orientation.orientation.x;
+                zero_calibrated = true;
+                
+                // Send acknowledgment (send current calibration status)
+                IMUCalibrationPayload cal_ack;
+                cal_ack.unit_id = IMU_UNIT_ID;
+                cal_ack.system_cal = cached_system_cal;
+                cal_ack.gyro_cal = cached_gyro_cal;
+                cal_ack.accel_cal = cached_accel_cal;
+                cal_ack.mag_cal = cached_mag_cal;
+                sendIMUCalibration(Serial, &cal_ack);
+            }
+        }
+    }
+    
     // Precise 100 Hz timing control
     uint32_t current_time_us = micros();
     uint32_t elapsed_us = current_time_us - last_sample_time_us;
@@ -144,25 +182,35 @@ void loop()
     
     last_sample_time_us = current_time_us;
     
-    // Get Euler angles and Gyro data (optimized: single I2C transaction per vector)
-    sensors_event_t orientationData, gyroData;
+    // Get Euler angles only (optimized: single I2C transaction)
+    sensors_event_t orientationData;
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-    bno.getEvent(&gyroData, Adafruit_BNO055::VECTOR_GYROSCOPE);
     
     // Prepare IMU data packet
     IMUDataPayload imu_data;
     imu_data.unit_id = IMU_UNIT_ID;
     
     // Convert to int16 (degrees * 100 for precision)
+    // Apply zero offset if calibrated
     // BNO055 Orientation: x=Yaw, y=Roll, z=Pitch
-    imu_data.roll = (int16_t)(orientationData.orientation.y * 100.0f);
-    imu_data.pitch = (int16_t)(orientationData.orientation.z * 100.0f);
-    imu_data.yaw = (int16_t)(orientationData.orientation.x * 100.0f);
+    float roll_raw = orientationData.orientation.y;
+    float pitch_raw = orientationData.orientation.z;
+    float yaw_raw = orientationData.orientation.x;
     
-    // Gyroscope data (deg/s * 100)
-    imu_data.gyro_x = (int16_t)(gyroData.gyro.x * 100.0f);
-    imu_data.gyro_y = (int16_t)(gyroData.gyro.y * 100.0f);
-    imu_data.gyro_z = (int16_t)(gyroData.gyro.z * 100.0f);
+    if (zero_calibrated)
+    {
+        roll_raw -= roll_offset;
+        pitch_raw -= pitch_offset;
+        yaw_raw -= yaw_offset;
+        
+        // Handle yaw wraparound (0-360 degrees)
+        if (yaw_raw > 180.0f) yaw_raw -= 360.0f;
+        if (yaw_raw < -180.0f) yaw_raw += 360.0f;
+    }
+    
+    imu_data.roll = (int16_t)(roll_raw * 100.0f);
+    imu_data.pitch = (int16_t)(pitch_raw * 100.0f);
+    imu_data.yaw = (int16_t)(yaw_raw * 100.0f);
     
     // Sequence number for packet tracking
     imu_data.sequence = packet_sequence++;

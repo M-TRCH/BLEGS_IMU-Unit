@@ -33,7 +33,7 @@ void protocolInit()
 }
 
 // Send IMU Data Packet (0x85)
-// Contains: Roll, Pitch, Yaw, Gyro X/Y/Z, Sequence
+// Contains: Roll, Pitch, Yaw, Sequence (Gyro removed for efficiency)
 void sendIMUData(Stream& serial, const IMUDataPayload* data)
 {
     uint8_t buffer[64];
@@ -43,7 +43,7 @@ void sendIMUData(Stream& serial, const IMUDataPayload* data)
     buffer[idx++] = PROTOCOL_HEADER1;
     buffer[idx++] = PROTOCOL_HEADER2;
     buffer[idx++] = FB_IMU_DATA;
-    buffer[idx++] = sizeof(IMUDataPayload);  // Payload length = 16
+    buffer[idx++] = sizeof(IMUDataPayload);  // Payload length = 10
     
     // Payload
     buffer[idx++] = data->unit_id;
@@ -59,18 +59,6 @@ void sendIMUData(Stream& serial, const IMUDataPayload* data)
     // Yaw (int16)
     buffer[idx++] = (data->yaw >> 8) & 0xFF;
     buffer[idx++] = data->yaw & 0xFF;
-    
-    // Gyro X (int16)
-    buffer[idx++] = (data->gyro_x >> 8) & 0xFF;
-    buffer[idx++] = data->gyro_x & 0xFF;
-    
-    // Gyro Y (int16)
-    buffer[idx++] = (data->gyro_y >> 8) & 0xFF;
-    buffer[idx++] = data->gyro_y & 0xFF;
-    
-    // Gyro Z (int16)
-    buffer[idx++] = (data->gyro_z >> 8) & 0xFF;
-    buffer[idx++] = data->gyro_z & 0xFF;
     
     // Sequence (uint16)
     buffer[idx++] = (data->sequence >> 8) & 0xFF;
@@ -88,6 +76,83 @@ void sendIMUData(Stream& serial, const IMUDataPayload* data)
     
     // Send packet
     serial.write(buffer, idx);
+}
+
+// Check if binary packet is available
+bool isBinaryPacketAvailable(Stream& serial)
+{
+    // Look for header bytes without consuming them
+    if (serial.available() >= 2)
+    {
+        // Peek at first byte
+        uint8_t first = serial.peek();
+        if (first == PROTOCOL_HEADER1)
+        {
+            return true;
+        }
+        else
+        {
+            // Discard invalid byte
+            serial.read();
+        }
+    }
+    return false;
+}
+
+// Receive and parse binary packet
+// Returns true if valid packet received
+bool receivePacket(Stream& serial, uint8_t* packet_type, uint8_t* payload, uint8_t* payload_length)
+{
+    // Look for header
+    if (serial.available() < 4) return false;  // Need at least header + type + length
+    
+    uint8_t header1 = serial.read();
+    if (header1 != PROTOCOL_HEADER1) return false;
+    
+    uint8_t header2 = serial.read();
+    if (header2 != PROTOCOL_HEADER2) return false;
+    
+    // Read packet type and length
+    *packet_type = serial.read();
+    *payload_length = serial.read();
+    
+    // Read payload (if any)
+    if (*payload_length > 0)
+    {
+        // Wait for payload with timeout
+        uint32_t start_time = millis();
+        while (serial.available() < *payload_length + 2)  // payload + CRC
+        {
+            if (millis() - start_time > 100)  // 100ms timeout
+            {
+                return false;
+            }
+        }
+        
+        for (uint8_t i = 0; i < *payload_length; i++)
+        {
+            payload[i] = serial.read();
+        }
+    }
+    
+    // Read CRC
+    if (serial.available() < 2) return false;
+    uint8_t crc_high = serial.read();
+    uint8_t crc_low = serial.read();
+    uint16_t received_crc = (crc_high << 8) | crc_low;
+    
+    // Verify CRC
+    uint8_t crc_buffer[PROTOCOL_MAX_PAYLOAD + 2];
+    crc_buffer[0] = *packet_type;
+    crc_buffer[1] = *payload_length;
+    for (uint8_t i = 0; i < *payload_length; i++)
+    {
+        crc_buffer[2 + i] = payload[i];
+    }
+    
+    uint16_t calculated_crc = calculateCRC16(crc_buffer, 2 + *payload_length);
+    
+    return (received_crc == calculated_crc);
 }
 
 // Send Raw Sensor Data Packet (0x86)
