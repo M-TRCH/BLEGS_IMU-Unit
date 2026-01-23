@@ -102,6 +102,7 @@ void setup()
     Wire.setSDA(PB9);
     Wire.setSCL(PB8);
     
+    // Start serial communication
     Serial.begin(921600);  // High-speed UART (same as motor protocol)
     Wire.begin();
     while (!Serial) delay(10);  // wait for serial port to open!
