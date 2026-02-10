@@ -30,6 +30,14 @@ uint8_t cached_system_cal = 0, cached_gyro_cal = 0, cached_accel_cal = 0, cached
 uint16_t calibration_read_counter = 0;
 const uint16_t CALIBRATION_READ_INTERVAL = 100;  // Update calibration every 100 samples (1 second)
 
+// Normalize angle to -180.0 to +180.0 range
+float normalizeAngle(float angle)
+{
+    while (angle > 180.0f) angle -= 360.0f;
+    while (angle < -180.0f) angle += 360.0f;
+    return angle;
+}
+
 void printEvent(sensors_event_t* event)
 {
     double x = -1000000, y = -1000000 , z = -1000000; //dumb values, easy to spot problem
@@ -133,6 +141,9 @@ void setup()
     
     delay(500);
     
+    // Drain any stale data from serial buffer
+    while (Serial.available()) Serial.read();
+    
     // Initialize timing
     last_sample_time_us = micros();
 }
@@ -156,7 +167,7 @@ void loop()
                 
                 roll_offset = current_orientation.orientation.y;
                 pitch_offset = current_orientation.orientation.z;
-                yaw_offset = current_orientation.orientation.x;
+                yaw_offset = normalizeAngle(current_orientation.orientation.x);  // Normalize 0-360 → ±180
                 zero_calibrated = true;
                 
                 // Send acknowledgment (send current calibration status)
@@ -193,10 +204,10 @@ void loop()
     
     // Convert to int16 (degrees * 100 for precision)
     // Apply zero offset if calibrated
-    // BNO055 Orientation: x=Yaw, y=Roll, z=Pitch
+    // BNO055 Orientation: x=Yaw(0~360), y=Roll(±90), z=Pitch(±180)
     float roll_raw = orientationData.orientation.y;
     float pitch_raw = orientationData.orientation.z;
-    float yaw_raw = orientationData.orientation.x;
+    float yaw_raw = normalizeAngle(orientationData.orientation.x);  // Fix: 0-360 → ±180 (prevents int16 overflow)
     
     if (zero_calibrated)
     {
@@ -204,9 +215,10 @@ void loop()
         pitch_raw -= pitch_offset;
         yaw_raw -= yaw_offset;
         
-        // Handle yaw wraparound (0-360 degrees)
-        if (yaw_raw > 180.0f) yaw_raw -= 360.0f;
-        if (yaw_raw < -180.0f) yaw_raw += 360.0f;
+        // Normalize ALL axes after offset subtraction
+        roll_raw = normalizeAngle(roll_raw);
+        pitch_raw = normalizeAngle(pitch_raw);
+        yaw_raw = normalizeAngle(yaw_raw);
     }
     
     imu_data.roll = (int16_t)(roll_raw * 100.0f);

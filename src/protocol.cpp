@@ -81,20 +81,16 @@ void sendIMUData(Stream& serial, const IMUDataPayload* data)
 // Check if binary packet is available
 bool isBinaryPacketAvailable(Stream& serial)
 {
-    // Look for header bytes without consuming them
-    if (serial.available() >= 2)
+    // Drain invalid bytes to resync with packet header (limit to avoid blocking)
+    uint8_t max_drain = 16;
+    while (serial.available() >= 2 && max_drain > 0)
     {
-        // Peek at first byte
-        uint8_t first = serial.peek();
-        if (first == PROTOCOL_HEADER1)
+        if (serial.peek() == PROTOCOL_HEADER1)
         {
             return true;
         }
-        else
-        {
-            // Discard invalid byte
-            serial.read();
-        }
+        serial.read();  // Discard non-header byte
+        max_drain--;
     }
     return false;
 }
@@ -116,27 +112,30 @@ bool receivePacket(Stream& serial, uint8_t* packet_type, uint8_t* payload, uint8
     *packet_type = serial.read();
     *payload_length = serial.read();
     
-    // Read payload (if any)
-    if (*payload_length > 0)
+    // Validate payload length to prevent buffer overflow
+    if (*payload_length > PROTOCOL_MAX_PAYLOAD)
     {
-        // Wait for payload with timeout
-        uint32_t start_time = millis();
-        while (serial.available() < *payload_length + 2)  // payload + CRC
+        return false;
+    }
+    
+    // Wait for payload + CRC with unified timeout
+    uint8_t total_remaining = *payload_length + 2;  // payload + CRC(2 bytes)
+    uint32_t start_time = millis();
+    while (serial.available() < total_remaining)
+    {
+        if (millis() - start_time > 100)  // 100ms timeout
         {
-            if (millis() - start_time > 100)  // 100ms timeout
-            {
-                return false;
-            }
-        }
-        
-        for (uint8_t i = 0; i < *payload_length; i++)
-        {
-            payload[i] = serial.read();
+            return false;
         }
     }
     
+    // Read payload
+    for (uint8_t i = 0; i < *payload_length; i++)
+    {
+        payload[i] = serial.read();
+    }
+    
     // Read CRC
-    if (serial.available() < 2) return false;
     uint8_t crc_high = serial.read();
     uint8_t crc_low = serial.read();
     uint16_t received_crc = (crc_high << 8) | crc_low;
