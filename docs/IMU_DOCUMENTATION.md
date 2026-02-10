@@ -7,6 +7,48 @@ IMU Unit ใช้ **Binary Protocol** ที่เข้ากันได้�
 - **One-way streaming @ 100 Hz** - IMU ส่งข้อมูลไปยังคอมพิวเตอร์อย่างต่อเนื่อง
 - **CRC16 validation** - ตรวจสอบความถูกต้องของข้อมูล
 - **Bidirectional commands** - รองรับคำสั่งจากคอมพิวเตอร์ (เช่น Set Zero)
+- **Cross-platform support** - รองรับทั้ง Windows, Linux, และ macOS
+
+---
+
+## 🆕 Recent Updates & Bug Fixes
+
+### Version 1.1 (2026-02-10)
+
+#### Critical Bugs Fixed
+
+**1. Yaw Overflow Bug (int16 overflow)**
+- **Problem**: BNO055 ส่ง yaw ในช่วง 0-360° แต่เมื่อแปลงเป็น `int16_t` ด้วยสูตร `(int16_t)(yaw * 100)` ค่า 360° จะกลายเป็น 36,000 ซึ่งเกิน `int16_t` max (32,767)
+- **Impact**: Yaw > 327.67° จะส่งค่าผิดพลาดไปยังคอมพิวเตอร์
+- **Fix**: Normalize yaw จาก 0-360° → ±180° **ก่อน** แปลงเป็น int16 โดยใช้ `normalizeAngle()` function
+
+**2. Set Zero - Roll/Pitch Not Normalized**
+- **Problem**: เมื่อกด Set Zero เฉพาะ yaw เท่านั้นที่มี wraparound handling หลังจากลบ offset ทำให้ roll และ pitch อาจได้ค่าผิดพลาด
+- **Impact**: บางแกนไม่รีเซตเป็น 0 หลังจากกด Set Zero
+- **Fix**: เพิ่ม `normalizeAngle()` ให้ทุกแกน (roll, pitch, yaw) หลังจากลบ offset และ normalize yaw_offset ตอนเก็บค่า
+
+**3. Protocol CRC Packet Loss**
+- **Problem**: `receivePacket()` ข้าม CRC wait loop เมื่อ payload=0 bytes (CMD_SET_ZERO) ทำให้ packet หาย
+- **Fix**: รวม timeout เป็น unified loop ที่รอทั้ง payload + CRC พร้อมกัน
+
+**4. Buffer Overflow Vulnerability**
+- **Problem**: ไม่มีการ validate payload length ก่อนอ่านเข้า buffer
+- **Fix**: เพิ่ม check `if (payload_length > PROTOCOL_MAX_PAYLOAD)` ใน `receivePacket()`
+
+#### Improvements
+
+**Firmware (main.cpp, protocol.cpp)**
+- เพิ่ม `normalizeAngle()` function สำหรับ normalize มุมให้อยู่ในช่วง ±180°
+- Drain serial buffer ตอน startup เพื่อป้องกัน stale data
+- Improve `isBinaryPacketAvailable()` ให้ drain ได้สูงสุด 16 bytes ต่อ call (resync เร็วขึ้น)
+- เพิ่ม payload length validation ป้องกัน buffer overflow
+
+**Python Client (test_imu.py)**
+- **Cross-platform keyboard support**: ใช้ได้ทั้ง Windows (msvcrt), Linux/Mac (select)
+- **Global error tracking**: แก้บั๊ก `error_count` ที่ไม่เคย increment → ใช้ `crc_error_count` แทน
+- **Sequence gap detection**: ตรวจจับ packet loss โดยเช็ค sequence number
+- **Auto buffer drain**: เพิ่ม `port.reset_input_buffer()` ตอนเชื่อมต่อ
+- แสดง CRC errors และ sequence gaps บน display
 
 ---
 
@@ -185,11 +227,13 @@ PORT = 'COM44'  # เปลี่ยนเป็น port ของคุณ
 python tools/test_imu.py
 ```
 
-#### Commands
+#### Commands (Cross-Platform)
 ```
-z + Enter    → ตั้งค่า Zero (Set current orientation as zero)
-Ctrl+C       → ออกจากโปรแกรม
+z (กดเดี่ยว)  → ตั้งค่า Zero (Set current orientation as zero)
+Ctrl+C        → ออกจากโปรแกรม
 ```
+
+**หมายเหตุ**: ไม่ต้องกด Enter หลัง 'z' - โปรแกรมจะตอบสนองทันทีบน Windows และ Unix/Mac
 
 #### Output Example
 ```
@@ -204,8 +248,20 @@ Connected to COM44 @ 921600 baud
 
 Receiving IMU data stream...
 ------------------------------------------------------------
-[00123] R: 45.23° P:-12.45° Y:180.67° | 100Hz | Cal:✓
+[00123] R:  45.23° P: -12.45° Y: 180.67° | 100Hz | Cal:✓ Err:0 Gap:0
+
+[CMD] Sending SET_ZERO command...
+[CMD] Waiting for acknowledgment...
+[CALIBRATION] System: 3/3 | Gyro: 3/3 | Accel: 3/3 | Mag: 3/3
+------------------------------------------------------------
+[00124] R:   0.00° P:   0.00° Y:   0.00° | 100Hz | Cal:✓ Err:0 Gap:0
 ```
+
+#### Display Metrics
+- **Err**: CRC error count (ควรเป็น 0 ถ้าการสื่อสารปกติ)
+- **Gap**: Sequence gap count (ตรวจจับ packet loss)
+- **Hz**: Actual packet rate (ควรเป็น 100 Hz)
+- **Cal**: ✓ = fully calibrated, ✗ = not calibrated
 
 ---
 
@@ -420,18 +476,31 @@ uint16_t calculateCRC16(const uint8_t* data, uint8_t length)
 
 ### ปัญหา: Zero Calibration ไม่ทำงาน
 
-**Symptoms**: กด 'z' แล้วค่ายังไม่เป็น 0
+**Symptoms**: กด 'z' แล้วค่ายังไม่เป็น 0 หรือบางแกนรีเซตไม่ถูกต้อง
+
+**Root Cause (ถ้าใช้โค้ดเก่า)**:
+1. Yaw overflow bug (ค่า > 327.67° จะผิดพลาด)
+2. Roll/Pitch ไม่ถูก normalize หลังลบ offset
+3. Yaw offset ไม่ถูก normalize ตอนเก็บค่า (0-360 vs ±180)
 
 **Solutions**:
-1. ตรวจสอบว่าเห็น message "[CMD] Sending SET_ZERO command..."
-2. รอ acknowledgment packet (CALIBRATION)
-3. ตรวจสอบว่า MCU ได้รับคำสั่ง:
-   ```cpp
-   // ใน main.cpp ควรมี code นี้
-   if (packet_type == CMD_SET_ZERO) {
-       // Set zero offset...
-   }
-   ```
+1. **อัพเดท firmware เป็น version 1.1+** (มีการแก้บั๊กครบถ้วน)
+2. ตรวจสอบว่าเห็น message "[CMD] Sending SET_ZERO command..."
+3. รอ acknowledgment packet (CALIBRATION) ปรากฏ
+4. ตรวจสอบว่า MCU ได้รับคำสั่ง (ดู serial debug)
+5. ทดสอบโดยหมุน IMU ไปรอบ ๆ และสังเกตว่าค่าไม่เกิน ±180°
+
+**Verification**:
+```bash
+# หลัง Set Zero ควรเห็นค่าประมาณนี้
+[00124] R:   0.00° P:   0.00° Y:   0.00° | 100Hz | Cal:✓
+
+# หมุน IMU ไป 180° ควรเห็น
+[00125] R: 180.00° P:   0.00° Y:   0.00° | 100Hz | Cal:✓
+
+# หมุนต่อไป -180° (ไม่ควรเกิน ±180)
+[00126] R:-180.00° P:   0.00° Y:   0.00° | 100Hz | Cal:✓
+```
 
 ---
 
@@ -544,7 +613,36 @@ while True:
 
 ---
 
-## 📝 Notes
+## � Security & Validation
+
+### Input Validation
+
+โปรโตคอลมีการตรวจสอบความปลอดภัยหลายชั้น:
+
+1. **Header Validation**: ตรวจสอบ 0xFE 0xEE ก่อนประมวลผล
+2. **Payload Length Check**: ป้องกัน buffer overflow
+   ```cpp
+   if (payload_length > PROTOCOL_MAX_PAYLOAD) return false;
+   ```
+3. **CRC16 Verification**: ตรวจสอบความถูกต้องของข้อมูล
+4. **Timeout Protection**: ป้องกัน hang จาก incomplete packets
+
+### Error Recovery
+
+**Firmware Side:**
+- Auto-drain invalid bytes (up to 16 bytes per cycle)
+- Timeout on packet receive (100ms)
+- Continue streaming even if command fails
+
+**Python Client Side:**
+- CRC error tracking และรายงาน
+- Sequence gap detection
+- Auto buffer reset on connect
+- Graceful timeout handling
+
+---
+
+## �📝 Notes
 
 ### Coordinate System
 
@@ -558,8 +656,20 @@ Yaw (X-axis):   Rotation around X-axis (heading/compass)
 ### Zero Calibration Behavior
 
 - Zero offset ใช้ได้จนกว่าจะ power cycle MCU
-- Yaw มี wraparound handling (-180° ถึง +180°)
-- Roll และ Pitch ไม่มี wraparound (linear)
+- **ทุกแกน** (Roll, Pitch, Yaw) มี wraparound handling (-180° ถึง +180°)
+- Angle normalization ทำงานหลังจากลบ offset เพื่อป้องกันค่าผิดพลาด
+- Yaw offset ถูก normalize ตอนเก็บเพื่อให้ตรงกับ runtime data format
+
+**Implementation Details:**
+```cpp
+// Zero offset storage (v1.1+)
+yaw_offset = normalizeAngle(current_yaw);  // 0-360 → ±180
+
+// Runtime calculation (v1.1+)
+roll_raw = normalizeAngle(roll_raw - roll_offset);
+pitch_raw = normalizeAngle(pitch_raw - pitch_offset);
+yaw_raw = normalizeAngle(yaw_raw - yaw_offset);
+```
 
 ### Calibration Tips
 
@@ -578,7 +688,25 @@ BNO055 ต้องการ calibration ก่อนใช้งาน:
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: 2025-12-21  
+**Document Version**: 1.1  
+**Firmware Version**: 1.1 (2026-02-10)  
+**Last Updated**: 2026-02-10  
 **Author**: M-TRCH  
 **Compatible with**: Motor Protocol v1.2
+
+### Changelog
+
+**v1.1 (2026-02-10)**
+- Fixed critical yaw overflow bug (int16 max exceeded)
+- Fixed Set Zero normalization for all axes
+- Fixed CRC packet loss for zero-payload commands
+- Added buffer overflow protection
+- Added cross-platform keyboard support (Windows/Linux/Mac)
+- Added error tracking and sequence gap detection
+- Improved packet resync performance
+
+**v1.0 (2025-12-21)**
+- Initial release
+- 100 Hz streaming with binary protocol
+- CRC16 validation
+- Set Zero command support
