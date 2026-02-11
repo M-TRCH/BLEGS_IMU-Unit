@@ -9,6 +9,9 @@
 const uint16_t TARGET_SAMPLE_RATE_HZ = 100;
 const uint32_t TARGET_SAMPLE_INTERVAL_US = 1000000 / TARGET_SAMPLE_RATE_HZ;  // 10000 microseconds
 
+// RUN LED pin (status indicator)
+const int RUN_LED_PIN = PA15;  // Built-in LED on most STM32 boards
+
 // Check I2C device address and correct line below (by default address is 0x29 or 0x28)
 //                                   id, address
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
@@ -29,6 +32,11 @@ bool zero_calibrated = false;
 uint8_t cached_system_cal = 0, cached_gyro_cal = 0, cached_accel_cal = 0, cached_mag_cal = 0;
 uint16_t calibration_read_counter = 0;
 const uint16_t CALIBRATION_READ_INTERVAL = 100;  // Update calibration every 100 samples (1 second)
+
+// RUN LED blinking control
+uint32_t last_led_toggle = 0;
+const uint32_t LED_BLINK_INTERVAL = 500;  // Blink every 500ms (2 Hz)
+bool led_state = false;
 
 // Normalize angle to -180.0 to +180.0 range
 float normalizeAngle(float angle)
@@ -109,6 +117,10 @@ void setup()
     Serial.setTx(PA9);
     Wire.setSDA(PB9);
     Wire.setSCL(PB8);
+    
+    // Initialize RUN LED
+    pinMode(RUN_LED_PIN, OUTPUT);
+    digitalWrite(RUN_LED_PIN, LOW);
     
     // Start serial communication
     Serial.begin(921600);  // High-speed UART (same as motor protocol)
@@ -259,5 +271,13 @@ void loop()
         
         sendIMUCalibration(Serial, &cal_data);
         last_calibration_send = current_time_ms;
+    }
+    
+    // Toggle RUN LED to indicate system is operating
+    if (current_time_ms - last_led_toggle >= LED_BLINK_INTERVAL)
+    {
+        led_state = !led_state;
+        digitalWrite(RUN_LED_PIN, led_state ? HIGH : LOW);
+        last_led_toggle = current_time_ms;
     }
 }
